@@ -21,7 +21,7 @@ The result is a single stream containing both H.264 video and synchronized JSON 
 
 | File | Description |
 |------|--------------|
-| `gst_rtsp_dualtrack_server_remote_gps.py` | Unified YOLO + GPS RTSP server (push or local stream) |
+| `gst_rtsp_dualtrack_server_remote.py` | Unified YOLO + GPS RTSP server (push or local stream) |
 | `gst_rtsp_dualtrack_client_remote.py` | RTSP client that prints or overlays detections + GPS |
 | `requirements.txt` | Python dependencies |
 | `README.md` | This documentation |
@@ -32,12 +32,12 @@ The result is a single stream containing both H.264 video and synchronized JSON 
 
 ### Example: YOLO + GPSD RTSP Server (remote push)
 ```bash
-python gst_rtsp_dualtrack_server_remote_gps.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --output rtsp://dev.imagery.comp-dev.org:8554/test-meta   --gpsd --gps-host gps.example.net --gps-port 2947   --print-detections
+python gst_rtsp_dualtrack_server_remote.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --output rtsp://dev.imagery.comp-dev.org:8554/test-meta   --gpsd --gps-host gps.example.net --gps-port 2947   --print-detections
 ```
 
 ### Example: Local RTSP Server (no push)
 ```bash
-python gst_rtsp_dualtrack_server_remote_gps.py   --input rtsp://camera/stream   --model yolov8n.pt   --port 8554 --path /live   --gpsd
+python gst_rtsp_dualtrack_server_remote.py   --input rtsp://camera/stream   --model yolov8n.pt   --port 8554 --path /live   --gpsd
 ```
 
 Each frame’s metadata includes YOLO detections and GPS fix:
