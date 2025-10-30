@@ -5,11 +5,19 @@ import time
 import cv2
 import threading
 import subprocess
+import sys
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 from ultralytics import YOLO
+
+# ---- Optional GPSD support ----
+try:
+    import gps as gpsd
+    HAS_GPSD = True
+except Exception:
+    HAS_GPSD = False
 
 Gst.init(None)
 
@@ -68,6 +76,68 @@ def ns_per_frame(fps):
     return int(1e9 / fps)
 
 
+# ---- GPSD polling thread ----
+class GpsPoller(threading.Thread):
+    def __init__(self, host="localhost", port=2947, interval=1.0):
+        super().__init__(daemon=True)
+        self.host = host
+        self.port = port
+        self.interval = float(interval)
+        self.retry_delay = 30.0  # hardcoded per request
+        self.running = True
+        self.session = None
+        self.fix = None
+        self._last_attempt = 0.0
+
+    def run(self):
+        while self.running:
+            now = time.time()
+            if self.session is None and (now - self._last_attempt) >= self.retry_delay:
+                self._last_attempt = now
+                try:
+                    self.session = gpsd.gps(host=self.host, port=self.port, mode=gpsd.WATCH_ENABLE)
+                    # Do not spam stdout; connect notice to stderr only
+                    print(f"[GPS] Connected to gpsd at {self.host}:{self.port}", file=sys.stderr)
+                except Exception as e:
+                    # Quiet retry (stderr once per attempt)
+                    print(f"[GPS] gpsd not available ({e}); retrying in {self.retry_delay}s", file=sys.stderr)
+                    self.session = None
+
+            if self.session is not None:
+                try:
+                    report = self.session.next()
+                    # TPV contains position/velocity
+                    if isinstance(report, dict):
+                        cls = report.get("class")
+                        if cls == "TPV":
+                            self.fix = {
+                                "lat": report.get("lat"),
+                                "lon": report.get("lon"),
+                                "alt": report.get("alt"),
+                                "speed": report.get("speed")
+                            }
+                    else:
+                        # Some bindings expose attributes
+                        if getattr(report, "class", None) == "TPV":
+                            self.fix = {
+                                "lat": getattr(report, "lat", None),
+                                "lon": getattr(report, "lon", None),
+                                "alt": getattr(report, "alt", None),
+                                "speed": getattr(report, "speed", None)
+                            }
+                except StopIteration:
+                    # gpsd ended; drop session and retry later
+                    self.session = None
+                    time.sleep(self.retry_delay)
+                except Exception:
+                    time.sleep(self.interval)
+            else:
+                time.sleep(self.retry_delay)
+
+    def latest(self):
+        return self.fix
+
+
 class Producer:
     def __init__(self, input_url, model_path, fps_override=None):
         self.cap = cv2.VideoCapture(input_url)
@@ -115,10 +185,26 @@ def main():
     ap.add_argument("--port", type=int, default=8554, help="RTSP TCP port to listen on (server mode)")
     ap.add_argument("--path", default="/live", help="RTSP mount point path (server mode)")
     ap.add_argument("--output", help="Optional remote RTSP URL to push (client mode)")
+    # ---- GPS args ----
+    ap.add_argument("--gpsd", action="store_true", help="Enable GPSD integration")
+    ap.add_argument("--gps-host", default="localhost", help="GPSD host (default: localhost)")
+    ap.add_argument("--gps-port", type=int, default=2947, help="GPSD port (default: 2947)")
+    ap.add_argument("--gps-interval", type=float, default=1.0, help="GPS polling interval seconds (default: 1.0)")
+    # Optional printing
+    ap.add_argument("--print-detections", action="store_true", help="Also print detection JSON to stdout")
     args = ap.parse_args()
 
     encoder_str = select_encoder()
     producer = Producer(args.input, args.model, fps_override=(args.fps or None))
+
+    # Start GPS thread if requested and available
+    gps_thread = None
+    if args.gpsd and HAS_GPSD:
+        gps_thread = GpsPoller(host=args.gps_host, port=args.gps_port, interval=args.gps_interval)
+        gps_thread.start()
+        print(f"[GPS] Enabled via gpsd at {args.gps_host}:{args.gps_port}", file=sys.stderr)
+    elif args.gpsd and not HAS_GPSD:
+        print("[GPS] gps python package not available; continuing without GPS", file=sys.stderr)
 
     if args.output:
         print(f"[Mode] Pushing multiplexed RTSP stream to {args.output}")
@@ -170,6 +256,9 @@ def main():
                         "bbox": [int(x) for x in b.xyxy[0]]
                     })
 
+            # GPS fix (top-level), or None
+            gps_fix = gps_thread.latest() if gps_thread else None
+
             meta = {
                 "utc": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
                 "frame_id": producer.frame_id,
@@ -180,17 +269,10 @@ def main():
                     "detection_time_ms": int(t_det * 1000),
                     "count": len(dets),
                     "detections": dets
-                }
+                },
+                "gps": gps_fix
             }
             payload = json.dumps(meta).encode("utf-8")
-
-            if vidsrc:
-                buf = Gst.Buffer.new_allocate(None, frame.nbytes, None)
-                buf.fill(0, frame.tobytes())
-                buf.pts = pts
-                buf.dts = pts
-                buf.duration = ns_frame
-                vidsrc.emit("push-buffer", buf)
 
             if metasrc:
                 mbuf = Gst.Buffer.new_allocate(None, len(payload), None)
@@ -200,6 +282,21 @@ def main():
                 mbuf.duration = ns_frame
                 metasrc.emit("push-buffer", mbuf)
 
+            if vidsrc:
+                buf = Gst.Buffer.new_allocate(None, frame.nbytes, None)
+                buf.fill(0, frame.tobytes())
+                buf.pts = pts
+                buf.dts = pts
+                buf.duration = ns_frame
+                vidsrc.emit("push-buffer", buf)
+
+            if args.print_detections:
+                # Compact JSON on server stdout to avoid bloating logs
+                print(json.dumps(meta, separators=(',', ':')))
+                if gps_fix is not None:
+                    print(f"[GPS] lat={gps_fix.get('lat')} lon={gps_fix.get('lon')} alt={gps_fix.get('alt')} speed={gps_fix.get('speed')}")
+
+            # Frame pacing
             time.sleep(max(0.0, (1.0 / producer.fps) - (time.time() - t0)))
 
     except KeyboardInterrupt:
