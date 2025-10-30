@@ -1,126 +1,125 @@
-# YOLO RTSP Stream with Embedded Metadata
+# RTSP Embedded Metadata Streaming (YOLO + GStreamer)
 
-This project demonstrates two complementary methods for embedding YOLO object-detection metadata into a live RTSP video stream and synchronizing it on the client side.
+This project demonstrates how to embed YOLOv8 detection metadata **into the same RTSP stream** as the video—no side UDP channel—using GStreamer dual tracks.  
+The server runs YOLO, injects detections into the metadata track, and optionally pushes to a remote RTSP host.  
+The client reads both tracks, prints the JSON metadata, and can optionally overlay detections.
 
-## Overview
+---
 
-| Mode | Description | Latency | Load |
-|------|--------------|----------|------|
-| Option 1 – Server Buffering | The server waits for YOLO detections before sending each frame. Perfect synchronization. | Higher (≈ YOLO inference time) | Heavy on server |
-| Option 2 – Client Alignment | The server streams video immediately; YOLO runs asynchronously and sends metadata separately. The client buffers and aligns frames. | Low (sub-second) | Heavier on client |
+## 🚀 Features
+- YOLOv8 inference on live or file-based video input.
+- Metadata embedded in-band in the RTSP stream (no UDP side channel).
+- Supports **local hosting** or **remote push** (`rtspclientsink`).
+- Automatic detection of encoder:
+  - Jetson / DeepStream → `nvv4l2h264enc`
+  - x86 / NVENC → `nvh264enc`
+  - Fallback → `x264enc`
+- Client prints detections as **pretty-printed JSON**.
+- Optional live overlay via OpenCV (`--overlay`).
 
-Both modes share the same basic structure:
+---
 
-Camera / File → YOLO → Metadata (UDP)
-                     ↘
-                      RTSP (FFmpeg) → Client
+## 🧠 Architecture Overview
+```
+[YOLOv8] → [Video + JSON Metadata] → [GStreamer Dual Track RTSP]
+                ↳ pay0: video/H264
+                ↳ pay1: application/x-gst (JSON)
+```
 
-## Requirements
+**Client:**
+```
+rtspsrc → (track 0 → video sink)
+        → (track 1 → metadata appsink)
+```
 
-* Python 3.8 or later
-* ffmpeg (must be installed and available on PATH)
-* Python packages:
-  * ultralytics
-  * opencv-python
-  * gpsd-py3 (optional, for GPS data)
+---
 
-Install dependencies:
+## 🖥️ Setup
 
-pip install ultralytics opencv-python gpsd-py3
+### 1. Install dependencies
+```bash
+sudo apt install python3-gi gir1.2-gst-1.0 gstreamer1.0-tools   gstreamer1.0-plugins-base gstreamer1.0-plugins-good   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly   gstreamer1.0-libav gstreamer1.0-rtsp
 
-## File Summary
+pip install -r requirements.txt
+```
 
-| File | Purpose |
-|------|----------|
-| yolo_rtsp_server_buffered_auto.py | Option 1 (Server Buffering). Frames are delayed until YOLO results are ready. Adaptive buffer keeps latency stable. |
-| yolo_rtsp_client_buffered_auto.py | Client for Option 1. Displays synchronized stream. |
-| yolo_rtsp_server_streaming.py | Option 2 (Server Streaming). Streams immediately, sends YOLO metadata asynchronously. |
-| yolo_rtsp_client_overlay_latency.py | Client for Option 2. Buffers frames, overlays YOLO detections, and shows real-time latency. |
+### 2. Verify NVIDIA encoder (Jetson / DeepStream)
+```bash
+gst-inspect-1.0 nvv4l2h264enc
+```
+If found, the pipeline will auto-select it.
 
-## Usage
+---
 
-### Option 1 — Server-Side Buffering (Synchronous)
+## 🧩 Usage
 
-Provides perfect alignment between frames and detections, at the cost of higher latency.
+### 🖥️ Start the Server
 
-# Terminal 1 – start the server
-python yolo_rtsp_server_buffered_auto.py \
-    --input http://64.191.148.57/mjpg/video.mjpg \
-    --model yolov8n \
-    --port 8554
+**Local RTSP Server**
+```bash
+python gst_rtsp_dualtrack_server_remote.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --port 8554   --path /live
+```
+→ Stream URL: `rtsp://localhost:8554/live`
 
-# Terminal 2 – start the client
-python yolo_rtsp_client_buffered_auto.py --port 8554
+**Push to Remote RTSP Host**
+```bash
+python gst_rtsp_dualtrack_server_remote.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --output rtsp://dev.imagery.comp-dev.org:8554/test-meta
+```
 
-Notes:
+---
 
-* The default RTSP endpoint is rtsp://0.0.0.0:8554/live.
-* Metadata is broadcast via UDP on port 9554 (8554 + 1000).
-* The server dynamically adjusts its buffer size based on YOLO inference time.
-* Console output shows per-frame latency and detections.
+### 🧭 Run the Client
 
-### Option 2 — Client-Side Alignment (Asynchronous)
+**Print JSON metadata only**
+```bash
+python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta
+```
 
-Provides low-latency video playback with a small client buffer (default 700 ms) used to align metadata.
+**Show live video with detection overlay**
+```bash
+python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta   --overlay
+```
 
-# Terminal 1 – start the server
-python yolo_rtsp_server_streaming.py \
-    --input http://64.191.148.57/mjpg/video.mjpg \
-    --model yolov8n \
-    --port 8554
+**Headless mode (no video, just logs)**
+```bash
+python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta   --no-video
+```
 
-# Terminal 2 – start the client
-python yolo_rtsp_client_overlay_latency.py --port 8554 --buffer-ms 700
+---
 
-Notes:
+## 🧩 Example Output
 
-* The server streams video immediately and runs YOLO in a background thread.
-* Metadata is timestamped and sent independently via UDP.
-* The client maintains a rolling frame buffer, finds the closest timestamp, draws bounding boxes, and displays a latency indicator on screen.
-* Press q in the window to quit.
-
-## Comparison
-
-| Feature | Option 1 | Option 2 |
-|----------|-----------|-----------|
-| Latency | ≈ YOLO time (300–800 ms typical) | < 200 ms visual |
-| Synchronization | Perfect (1 : 1 frame) | Near-perfect (± 1 frame) |
-| Server Load | High (buffering + inference) | Low (inference only) |
-| Client Load | Low | Moderate (buffer + overlay) |
-| Use Case | Analytics, recording, dataset labeling | Live monitoring, dashboards |
-| Scalability | Single-client focus | Many clients supported |
-
-## Metadata Format
-
-Each UDP metadata packet contains a JSON object:
-
+**Console (JSON pretty print):**
+```json
 {
-  "utc": "2025-10-30T14:10:00.532Z",
-  "frame_id": 312,
-  "pts": 42.317,
+  "frame_id": 1024,
+  "timestamp": 1730201522.819,
   "yolo": {
-    "analyzed_frame_id": 312,
-    "analyzed_pts": 42.317,
-    "detection_time": 0.091,
-    "count": 3,
     "detections": [
-      { "class": "person", "conf": 0.87, "bbox": [210, 100, 360, 480] },
-      { "class": "dog", "conf": 0.72, "bbox": [420, 200, 520, 460] }
-    ]
-  },
-  "gps": { "lat": 38.89, "lon": -77.03 }
+      {"class": "person", "conf": 0.92, "bbox": [315, 57, 402, 291]},
+      {"class": "dog", "conf": 0.87, "bbox": [78, 85, 225, 312]}
+    ],
+    "det_ms": 23.8
+  }
 }
+```
 
-## Tips
+**Overlay (when enabled):**
+- Bounding boxes and labels drawn directly onto decoded frames.
 
-* Use --model yolov8n.pt or --model yolov8s.pt to select a YOLO model.
-* Use --input 0 for a live webcam.
-* In Option 1, latency equals YOLO inference time; choose a faster model to reduce lag.
-* In Option 2, if detections appear slightly late, increase --buffer-ms.
+---
 
-## Future Enhancements
+## 🧰 Troubleshooting
 
-* Hybrid mode (server embeds metadata once ready; clients choose live or synchronized mode)
-* WebSocket metadata transport
-* Rolling latency graph on the client for debugging
+| Problem | Fix |
+|----------|------|
+| “Failed to load plugin libgstrtspserver…” | `sudo apt install libgstrtspserver-1.0-0` |
+| “No such element nvh264enc” | Use Jetson’s `nvv4l2h264enc` or install NVENC SDK |
+| DeepStream warnings | Harmless if pipeline still runs |
+| No detections printed | Ensure YOLO model file is valid and accessible |
+| High latency | Lower `--latency` on client or `queue-size` on server |
 
+---
+
+## 🧩 License
+MIT License © 2025 — Created for research & development of in-band RTSP metadata streaming.

@@ -1,5 +1,4 @@
-ultralytics>=8.0.0
+ultralytics>=8.1.0
 opencv-python>=4.8.0
-numpy>=1.24.0
-gpsd-py3>=0.3.0
-
+numpy>=1.25.0
+PyGObject>=3.46.0
