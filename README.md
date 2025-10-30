@@ -44,7 +44,10 @@ pip install ultralytics opencv-python gpsd-py3
 Provides perfect alignment between frames and detections, at the cost of higher latency.
 
 # Terminal 1 – start the server
-python yolo_rtsp_server_buffered_auto.py --input sample.mp4
+python yolo_rtsp_server_buffered_auto.py \
+    --input http://64.191.148.57/mjpg/video.mjpg \
+    --model yolov8n \
+    --port 8554
 
 # Terminal 2 – start the client
 python yolo_rtsp_client_buffered_auto.py --port 8554
@@ -61,7 +64,10 @@ Notes:
 Provides low-latency video playback with a small client buffer (default 700 ms) used to align metadata.
 
 # Terminal 1 – start the server
-python yolo_rtsp_server_streaming.py --input sample.mp4
+python yolo_rtsp_server_streaming.py \
+    --input http://64.191.148.57/mjpg/video.mjpg \
+    --model yolov8n \
+    --port 8554
 
 # Terminal 2 – start the client
 python yolo_rtsp_client_overlay_latency.py --port 8554 --buffer-ms 700
