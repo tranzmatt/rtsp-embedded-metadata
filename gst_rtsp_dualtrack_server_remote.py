@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import json
 import time
 import cv2
@@ -11,6 +12,8 @@ gi.require_version('Gst', '1.0')
 gi.require_version('GstRtspServer', '1.0')
 from gi.repository import Gst, GLib, GstRtspServer
 from ultralytics import YOLO
+import urllib.request
+
 
 # ---- Optional GPSD support ----
 try:
@@ -21,6 +24,22 @@ except Exception:
 
 Gst.init(None)
 
+def ensure_model_exists(model_path: str):
+    if os.path.exists(model_path):
+        return model_path
+
+    base_url = "https://github.com/ultralytics/assets/releases/download/v0.0.0"
+    fname = os.path.basename(model_path)
+    url = f"{base_url}/{fname}"
+
+    print(f"[Model] {model_path} not found. Downloading from {url} ...")
+    try:
+        urllib.request.urlretrieve(url, model_path)
+        print(f"[Model] Download complete: {model_path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to download YOLO model from {url}: {e}")
+    return model_path
+
 
 def has_element(name: str) -> bool:
     try:
@@ -29,18 +48,17 @@ def has_element(name: str) -> bool:
     except Exception:
         return False
 
-
 def select_encoder():
     if has_element("nvv4l2h264enc"):
         print("[Encoder] Using NVIDIA Jetson hardware encoder (nvv4l2h264enc)", file=sys.stderr)
-        return "nvv4l2h264enc bitrate=4000000 insert-sps-pps=true iframeinterval=30 preset-level=1 profile=high"
+        # Jetson encoder: safe, valid properties only
+        return "nvv4l2h264enc bitrate=4000000 insert-sps-pps=true iframeinterval=30"
     elif has_element("nvh264enc"):
         print("[Encoder] Using NVIDIA NVENC hardware encoder (nvh264enc)", file=sys.stderr)
-        return "nvh264enc preset=llhp"
+        return "nvh264enc preset=llhp bitrate=4000000 insert-sps-pps=true"
     else:
         print("[Encoder] Using software encoder (x264enc)", file=sys.stderr)
-        return "x264enc tune=zerolatency speed-preset=ultrafast"
-
+        return "x264enc tune=zerolatency speed-preset=ultrafast bitrate=4000000"
 
 class DualTrackFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self, width, height, fps, encoder_str):
@@ -148,6 +166,7 @@ class Producer:
         self.fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or (fps_override or 25)
         if fps_override:
             self.fps = fps_override
+        model_path = ensure_model_exists(model_path)
         self.model = YOLO(model_path)
         self.frame_id = 0
         self.running = True
@@ -163,19 +182,30 @@ class Producer:
         self.running = False
         self.cap.release()
 
-
 def build_push_pipeline(output_url, width, height, fps, encoder_str):
     pipeline_str = (
         f"appsrc name=vidsrc is-live=true format=time do-timestamp=true "
+        f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
+        f"queue ! videoconvert ! {encoder_str} ! h264parse config-interval=1 ! "
+        f"mpegtsmux name=mux ! rtpmp2tpay ! rtspclientsink location={output_url}"
+    )
+    print('[Pipeline]', pipeline_str)
+    return pipeline_str
+
+
+def build_push_pipeline_1(output_url, width, height, fps, encoder_str):
+    pipeline_str = (
+        f"appsrc name=vidsrc is-live=true format=time do-timestamp=true "
         f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 "
-        f"! queue ! videoconvert ! {encoder_str} ! h264parse config-interval=1 ! mux. "
+        f"! queue ! videoconvert ! {encoder_str} ! h264parse ! rtph264pay name=pay0 pt=96 "
         f"appsrc name=metasrc is-live=true format=time do-timestamp=true "
         f"caps=application/x-gst,rate={fps} "
-        f"! queue ! rtpgstpay name=pay1 pt=98 ! mux. "
+        f"! queue ! rtpgstpay name=pay1 pt=98 "
+        f"rtpbin name=rtpbin "
+        f"rtpbin.send_rtp_sink_0 :: pay0.src rtpbin.send_rtp_sink_1 :: pay1.src "
         f"rtspclientsink location={output_url}"
     )
     return pipeline_str
-
 
 def main():
     ap = argparse.ArgumentParser()
