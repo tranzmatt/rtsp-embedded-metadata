@@ -182,16 +182,18 @@ class Producer:
         self.running = False
         self.cap.release()
 
+
 def build_push_pipeline(output_url, width, height, fps, encoder_str):
+    host = "localhost"
+    port = 8554
     pipeline_str = (
         f"appsrc name=vidsrc is-live=true format=time do-timestamp=true "
-        f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "
-        f"queue ! videoconvert ! {encoder_str} ! h264parse config-interval=1 ! "
-        f"mpegtsmux name=mux ! rtpmp2tpay ! rtspclientsink location={output_url}"
+        f"caps=video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 "
+        f"! queue ! videoconvert ! {encoder_str} ! h264parse ! rtph264pay config-interval=1 pt=96 "
+        f"! udpsink host={host} port={port} sync=false"
     )
     print('[Pipeline]', pipeline_str)
     return pipeline_str
-
 
 def build_push_pipeline_1(output_url, width, height, fps, encoder_str):
     pipeline_str = (
