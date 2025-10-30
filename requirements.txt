@@ -2,3 +2,4 @@ ultralytics>=8.1.0
 opencv-python>=4.8.0
 numpy>=1.25.0
 PyGObject>=3.46.0
+gps>=3.23.0  # optional, required only if using --gpsd

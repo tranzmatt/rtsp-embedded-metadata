@@ -1,125 +1,112 @@
-# RTSP Embedded Metadata Streaming (YOLO + GStreamer)
+# RTSP Embedded Metadata (YOLO + GPS + GStreamer)
 
-This project demonstrates how to embed YOLOv8 detection metadata **into the same RTSP stream** as the video—no side UDP channel—using GStreamer dual tracks.  
-The server runs YOLO, injects detections into the metadata track, and optionally pushes to a remote RTSP host.  
-The client reads both tracks, prints the JSON metadata, and can optionally overlay detections.
+This project demonstrates how to **embed YOLOv8 detections and optional GPSD telemetry directly into an RTSP stream** using a dual-track GStreamer pipeline.  
+The result is a single stream containing both H.264 video and synchronized JSON metadata — no side channels or separate UDP sockets.
 
 ---
 
 ## 🚀 Features
-- YOLOv8 inference on live or file-based video input.
-- Metadata embedded in-band in the RTSP stream (no UDP side channel).
-- Supports **local hosting** or **remote push** (`rtspclientsink`).
-- Automatic detection of encoder:
-  - Jetson / DeepStream → `nvv4l2h264enc`
-  - x86 / NVENC → `nvh264enc`
-  - Fallback → `x264enc`
-- Client prints detections as **pretty-printed JSON**.
-- Optional live overlay via OpenCV (`--overlay`).
+
+- Real-time **YOLOv8 object detection**
+- Metadata embedding directly into RTSP stream (same frames)
+- Optional **GPSD integration** for geolocation data
+- Local or **remote RTSP push**
+- Smart encoder selection (DeepStream hardware → software fallback)
+- Client supports **overlay rendering** or **pretty-printed JSON**
+- Robust and reconnecting GPS polling (30s interval)
 
 ---
 
-## 🧠 Architecture Overview
-```
-[YOLOv8] → [Video + JSON Metadata] → [GStreamer Dual Track RTSP]
-                ↳ pay0: video/H264
-                ↳ pay1: application/x-gst (JSON)
+## 🧩 Files
+
+| File | Description |
+|------|--------------|
+| `gst_rtsp_dualtrack_server_remote_gps.py` | Unified YOLO + GPS RTSP server (push or local stream) |
+| `gst_rtsp_dualtrack_client_remote.py` | RTSP client that prints or overlays detections + GPS |
+| `requirements.txt` | Python dependencies |
+| `README.md` | This documentation |
+
+---
+
+## 🧭 Server Usage
+
+### Example: YOLO + GPSD RTSP Server (remote push)
+```bash
+python gst_rtsp_dualtrack_server_remote_gps.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --output rtsp://dev.imagery.comp-dev.org:8554/test-meta   --gpsd --gps-host gps.example.net --gps-port 2947   --print-detections
 ```
 
-**Client:**
+### Example: Local RTSP Server (no push)
+```bash
+python gst_rtsp_dualtrack_server_remote_gps.py   --input rtsp://camera/stream   --model yolov8n.pt   --port 8554 --path /live   --gpsd
 ```
-rtspsrc → (track 0 → video sink)
-        → (track 1 → metadata appsink)
+
+Each frame’s metadata includes YOLO detections and GPS fix:
+
+```json
+{
+  "frame_id": 145,
+  "timestamp": 1730201801.84,
+  "yolo": { "detections": [...], "det_ms": 27.3 },
+  "gps": { "lat": 37.7749, "lon": -122.4194, "alt": 16.4, "speed": 0.1 }
+}
+[GPS] lat=37.7749 lon=-122.4194 alt=16.4 speed=0.1
 ```
 
 ---
 
-## 🖥️ Setup
+## 🧠 Client Usage
 
-### 1. Install dependencies
+The client receives the RTSP stream, extracts embedded JSON metadata, and either prints it prettily or overlays bounding boxes.
+
+```bash
+python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta   --overlay  # optional
+```
+
+---
+
+## 🧰 Dependencies
+
+Install dependencies:
+
 ```bash
 sudo apt install python3-gi gir1.2-gst-1.0 gstreamer1.0-tools   gstreamer1.0-plugins-base gstreamer1.0-plugins-good   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly   gstreamer1.0-libav gstreamer1.0-rtsp
 
 pip install -r requirements.txt
 ```
 
-### 2. Verify NVIDIA encoder (Jetson / DeepStream)
-```bash
-gst-inspect-1.0 nvv4l2h264enc
-```
-If found, the pipeline will auto-select it.
+> 💡 The `gps` package is only required if using `--gpsd`.
 
 ---
 
-## 🧩 Usage
+## ⚙️ Encoder Notes
 
-### 🖥️ Start the Server
-
-**Local RTSP Server**
-```bash
-python gst_rtsp_dualtrack_server_remote.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --port 8554   --path /live
-```
-→ Stream URL: `rtsp://localhost:8554/live`
-
-**Push to Remote RTSP Host**
-```bash
-python gst_rtsp_dualtrack_server_remote.py   --input http://64.191.148.57/mjpg/video.mjpg   --model yolov8n.pt   --output rtsp://dev.imagery.comp-dev.org:8554/test-meta
-```
+The pipeline automatically chooses the best available encoder:
+1. **nvv4l2h264enc** – NVIDIA DeepStream hardware encoder (Jetson, A100, etc.)
+2. **nvh264enc** – NVENC hardware encoder (desktop GPUs)
+3. **x264enc** – Software fallback (CPU-only systems)
 
 ---
 
-### 🧭 Run the Client
+## 🧾 Changelog
 
-**Print JSON metadata only**
-```bash
-python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta
-```
+### 2025-10 — Unified YOLO + GPS Version
+- Added GPSD integration with reconnect and top-level metadata
+- Optional `--gpsd`, `--gps-host`, and `--gps-port` flags
+- `[GPS] lat lon alt speed` printed alongside detections
+- Replaced previous non-GPS and buffered variants
+- Maintains backward compatibility for all prior CLI options
+- Improved RTSP push and encoder selection logic
 
-**Show live video with detection overlay**
-```bash
-python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta   --overlay
-```
+### 2025-09 — Buffered/Alignment Versions
+- Frame synchronization between YOLO detections and video
+- Reduced latency via frame queueing and timestamp matching
 
-**Headless mode (no video, just logs)**
-```bash
-python gst_rtsp_dualtrack_client_remote.py   --url rtsp://dev.imagery.comp-dev.org:8554/test-meta   --no-video
-```
-
----
-
-## 🧩 Example Output
-
-**Console (JSON pretty print):**
-```json
-{
-  "frame_id": 1024,
-  "timestamp": 1730201522.819,
-  "yolo": {
-    "detections": [
-      {"class": "person", "conf": 0.92, "bbox": [315, 57, 402, 291]},
-      {"class": "dog", "conf": 0.87, "bbox": [78, 85, 225, 312]}
-    ],
-    "det_ms": 23.8
-  }
-}
-```
-
-**Overlay (when enabled):**
-- Bounding boxes and labels drawn directly onto decoded frames.
+### 2025-08 — Initial Dual-Track Architecture
+- Introduced GStreamer dual-track (H.264 + JSON metadata)
+- Added client with overlay toggle and pretty JSON output
 
 ---
 
-## 🧰 Troubleshooting
+## 🧡 Credits
 
-| Problem | Fix |
-|----------|------|
-| “Failed to load plugin libgstrtspserver…” | `sudo apt install libgstrtspserver-1.0-0` |
-| “No such element nvh264enc” | Use Jetson’s `nvv4l2h264enc` or install NVENC SDK |
-| DeepStream warnings | Harmless if pipeline still runs |
-| No detections printed | Ensure YOLO model file is valid and accessible |
-| High latency | Lower `--latency` on client or `queue-size` on server |
-
----
-
-## 🧩 License
-MIT License © 2025 — Created for research & development of in-band RTSP metadata streaming.
+Developed for NVIDIA DeepStream + YOLOv8 workflows, designed to run on both Jetson and x86 systems.
